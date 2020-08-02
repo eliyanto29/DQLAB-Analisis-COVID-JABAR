@@ -1,0 +1,234 @@
+---
+title: "Analisis Data COVID-19 di Jawa Barat"
+author: "Joko Eliyanto"
+date: "August 2, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Latar Belakang Project
+
+COVID-19 merupakan penyakit yang saat ini telah menjadi pandemi secara global. Kondisi menjadi semakin mengkhawatirkan karena hingga detik ini masih belum ditemukan vaksin yang efektif untuk virus penyebab COVID-19. Pemerintah di berbagai negara umumnya dengan sigap membentuk gugus tugas (task force unit) untuk menangani penyebaran COVID-19 di masyarakat, termasuk pemerintah di Indonesia.
+
+Salah satu bentuk aksi yang dilakukan oleh pemerintah adalah dengan mengumpulkan dan menyediakan data pertumbuhan kasus COVID-19 kepada publik. Data pertumbuhan kasus tersebut tidak jarang juga dilengkapi dengan dasbor dan grafik visualisasi pendukung dengan harapan masyarakat dapat memahami informasi dengan lebih mudah. Sebagai contoh adalah portal covid19.go.id besutan Gugus Tugas Penanganan COVID-19 Nasional dan portal PIKOBAR milik pemerintah Provinsi Jawa Barat. Serta banyak portal data COVID-19 lainnya yang disediakan oleh masing-masing pemerintah daerah.
+
+
+```{r}
+library(httr)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(hrbrthemes)
+library(lubridate)
+library(shiny)
+library(shinythemes)
+library(tidyr)
+```
+
+## Laporan Pergerakan Kasus COVID-19 Provinsi Jawa Barat
+
+Transformasi Data
+```{r}
+resp_jabar <- GET("https://data.covid19.go.id/public/api/prov_detail_JAWA_BARAT.json")
+cov_jabar_raw <- content(resp_jabar, as = "parsed", simplifyVector = TRUE)
+    
+cov_jabar<-cov_jabar_raw$list_perkembangan
+
+new_cov_jabar <-
+  cov_jabar %>% 
+  select(-contains("DIRAWAT_OR_ISOLASI")) %>% 
+  select(-starts_with("AKUMULASI")) %>% 
+  rename(
+    kasus_baru = KASUS,
+    meninggal = MENINGGAL,
+    sembuh = SEMBUH
+    ) %>% 
+  mutate(
+    tanggal = as.POSIXct(tanggal / 1000, origin = "1970-01-01"),
+    tanggal = as.Date(tanggal)
+    )
+    
+cov_jabar_akumulasi <- 
+  new_cov_jabar %>% 
+  transmute(
+    tanggal,
+    akumulasi_aktif = cumsum(kasus_baru) - cumsum(sembuh) - cumsum(meninggal),
+    akumulasi_sembuh = cumsum(sembuh),
+    akumulasi_meninggal = cumsum(meninggal)
+    )
+
+cov_jabar_akumulasi2 <- 
+  new_cov_jabar %>% 
+  transmute(
+    tanggal,
+    kasus_baru=kasus_baru,
+    akumulasi_aktif = cumsum(kasus_baru) - cumsum(sembuh) - cumsum(meninggal),
+    akumulasi_sembuh = cumsum(sembuh),
+    akumulasi_meninggal = cumsum(meninggal)
+    )
+
+cov_jabar_akumulasi_pivot <- 
+  cov_jabar_akumulasi %>% 
+  gather(
+    key = "kategori",
+    value = "jumlah",
+    -tanggal
+    ) %>% 
+  mutate(
+    kategori = sub(pattern = "akumulasi_", replacement = "", kategori)
+    )
+    
+cov_jabar_akumulasi_pivot <-
+  cov_jabar_akumulasi %>%
+  pivot_longer(
+    cols = -tanggal,
+    names_to = "kategori",
+    names_prefix = "akumulasi_",
+    values_to = "jumlah"
+    )
+    
+```
+
+Akan ditunjukkan data akumulasi aktif dan data kasus baru. Melalui grafik berikut akan diidentifikasi keterkaitan keduanya
+
+```{r}
+ggplot(cov_jabar_akumulasi2, aes(x=tanggal)) +
+  geom_line(aes(y = kasus_baru, colour = "Kasus Baru"))+
+  geom_line(aes(y = akumulasi_aktif, colour = "Akumulasi Kasus Aktif"))+
+  scale_y_continuous(sec.axis = sec_axis(~.*5, name = "Akumulasi Kasus Aktif"))+
+  scale_colour_manual(values = c("blue", "red"))+
+  labs(y = "Kasus Baru",
+       x = "Tanggal",
+       colour = "Parameter")+
+  theme(legend.position = "top")+
+  theme(plot.title.position = "plot")
+```
+
+## Dinamika Kasus Covid-19 Provinsi Jawa Barat
+Akan dilakukan visualisasi untuk seluruh data baik kasus aktif, sembuh dan meninggal. Melalui visualisasi diharapkan bisa mengetahui dinamika kasus covid-19 di Provinsi Jawa Barat.
+```{r}
+
+ggplot(cov_jabar_akumulasi_pivot, aes(tanggal, jumlah, colour = (kategori))) +
+  geom_line(size = 0.9) +
+  scale_y_continuous(sec.axis = dup_axis(name = NULL)) +
+  scale_colour_manual(
+    values = c(
+      "aktif" = "salmon",
+      "meninggal" = "darkslategray4",
+      "sembuh" = "olivedrab2"
+    ),
+    labels = c("Aktif", "Meninggal", "Sembuh")
+    ) +
+  labs(
+    x = NULL,
+    y = "Jumlah kasus akumulasi",
+    colour = NULL,
+    title = "Dinamika Kasus COVID-19 di Jawa Barat",
+    caption = "Sumber data: covid.19.go.id"
+  ) 
+```
+
+
+## Apakah penanganan COVID-19 oleh PemProv Jawa Barat efektif?
+### Analisis Dampak PSBB bagi jumlah kasus COVID-19 Provinsi Jawa Barat 
+
+Untuk mengetahui apakah penanganan oleh PemProv sudah cukup baik atau belum, maka akan ditunjukkan data didasarkan pada interval waktu diterapkannya PSBB dan pasca PSBB sebagai berikut.
+```{r}
+
+ggplot(cov_jabar_akumulasi_pivot, aes(tanggal, jumlah, colour = (kategori))) +
+  geom_line(size = 0.9) +
+  scale_y_continuous(sec.axis = dup_axis(name = NULL)) +
+  scale_colour_manual(
+    values = c(
+      "aktif" = "salmon",
+      "meninggal" = "darkslategray4",
+      "sembuh" = "olivedrab2"
+    ),
+    labels = c("Aktif", "Meninggal", "Sembuh")
+    ) +
+  labs(
+    x = NULL,
+    y = "Jumlah kasus akumulasi",
+    colour = NULL,
+    title = "PSBB VS PASCA PSBB",
+    caption = "Sumber data: covid.19.go.id"
+  ) +
+  annotate("rect", xmin=cov_jabar_akumulasi_pivot$tanggal[199], 
+             xmax=cov_jabar_akumulasi_pivot$tanggal[354], 
+             ymin=min(cov_jabar_akumulasi_pivot$jumlah), 
+             ymax=max(cov_jabar_akumulasi_pivot$jumlah), 
+             alpha=0.2, 
+             color="red", 
+             fill="red" 
+  )+
+  annotate("rect", xmin=cov_jabar_akumulasi_pivot$tanggal[354], 
+             xmax=cov_jabar_akumulasi_pivot$tanggal[460], 
+             ymin=min(cov_jabar_akumulasi_pivot$jumlah), 
+             ymax=max(cov_jabar_akumulasi_pivot$jumlah), 
+             alpha=0.2, 
+             color="green", 
+             fill="green"
+  )
+```
+
+### Proporsi Kasus Aktif, Sembuh dan Meninggal
+Akan ditunjukkan perbandingan jumlah kasus aktif, sembuh dan meninggal. Visualisasi ini dapat membantu untuk melihat apakah jumlah kasus sembuh sudah lebih dominan atau belum.
+```{r}
+data <- cov_jabar_akumulasi_pivot[199:length(cov_jabar_akumulasi_pivot$tanggal),]
+ggplot(data, aes(tanggal, jumlah)) +
+  geom_col(aes(fill = kategori), width = 0.7)+
+  labs(
+    x = NULL,
+    y = "Jumlah kasus akumulasi",
+    colour = NULL,
+    title = "Proporsi Kasus Aktif, Sembuh, dan Meninggal",
+    caption = "Sumber data: covid.19.go.id"
+  ) +
+  annotate("rect", xmin=data$tanggal[1], 
+             xmax=data$tanggal[154], 
+             ymin=0, 
+             ymax=7000, 
+             alpha=0.1, 
+             color="red", 
+             fill="red"
+  )+
+  annotate("rect", xmin=data$tanggal[154], 
+             xmax=data$tanggal[264], 
+             ymin=0, 
+             ymax=7000, 
+             alpha=0.1, 
+             color="green", 
+             fill="green"
+  )
+  
+
+```
+
+### Persentase Kesembuhan
+Persentasi kesembuhan yang tinggi merupakan pertanda kuat bahwa penanganan wabah sudah berhasil dilakukan berikut visualisasi persentase tingkat kesembuhan terhadap titik puncak kasus positif.
+
+```{r}
+cov_jabar_akumulasi3 <- 
+  new_cov_jabar %>% 
+  transmute(
+    tanggal,
+    persentasesembuh = sembuh/max(kasus_baru)
+    )
+
+data1 <- cov_jabar_akumulasi3[67:length(cov_jabar_akumulasi_pivot$tanggal),]
+
+ggplot(data1, aes(tanggal, persentasesembuh)) +
+  geom_col(size = 0.9) +
+  labs(
+    x = NULL,
+    y = "Jumlah kasus akumulasi",
+    colour = "persentasesembuh",
+    title = "Persentase Kasus Sembuh Terhadap Titik Puncak",
+    caption = "Sumber data: covid.19.go.id"
+  ) 
+```
+
+
